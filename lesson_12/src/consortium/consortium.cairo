@@ -1,13 +1,22 @@
 %lang starknet
 from starkware.cairo.common.cairo_builtins import HashBuiltin, BitwiseBuiltin
-from starkware.starknet.common.syscalls import get_caller_address, get_block_timestamp
-from starkware.cairo.common.math import unsigned_div_rem, assert_le_felt, assert_le, assert_nn
-from starkware.cairo.common.math_cmp import is_le
+from starkware.starknet.common.syscalls import get_caller_address, get_block_timestamp, storage_write
+from starkware.cairo.common.math import unsigned_div_rem, assert_le_felt, assert_le, assert_nn, assert_not_zero
+from starkware.cairo.common.math_cmp import is_le, is_not_zero
 from starkware.cairo.common.alloc import alloc
 from starkware.cairo.common.pow import pow
+from starkware.cairo.common.hash import hash2
 from starkware.cairo.common.hash_state import hash_init, hash_update
 from starkware.cairo.common.bitwise import bitwise_and, bitwise_xor, bitwise_or
 from lib.constants import TRUE, FALSE
+
+// Constants
+//#########################################################################################
+const MAX_LEN               = 31; 
+const KEY_PROPOSALS_TITLE   = 0x018E41c9c91ea1EaB61438Ab3dcB93EB2dD4f80072dD0e5F0f7B22eaAbd70dAc;
+const KEY_PROPOSALS_LINK    = 0x00DE2037e2ECC908B792b5190Ef35147Fc4d43cA5Bca37598550b53C578b692E;
+const KEY_PROPOSALS_ANSWERS = 0x04b5B35c8356d83b5e8313084D3aE055432DECa382412F30Cf26085115270f6c;
+
 
 // Structs
 //#########################################################################################
@@ -47,6 +56,7 @@ struct Winner {
 
 @storage_var
 func consortium_idx() -> (idx: felt) {
+
 }
 
 @storage_var
@@ -96,15 +106,22 @@ func answered(consortium_idx: felt, proposal_idx: felt, member_addr: felt) -> (t
 
 @external
 func create_consortium{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}() {
-    let (chairperson) = get_caller_address();
-    let (consortium_id) = consortium_idx.read();
+    // creator becomes chairperson and member 
+    // initialize consortium 
 
-    consortiums.write(consortium_id, Consortium(chairperson, 0));
-    members.write(consortium_id, chairperson, Member(100, TRUE, TRUE));
+    let (caller: felt) = get_caller_address(); 
 
-    tempvar new_consortium_id = consortium_id + 1;
-    consortium_idx.write(new_consortium_id);
+    tempvar consortium: Consortium* = new Consortium(chairperson = caller, proposal_count = 0);
 
+    let (consortium_idx_) = consortium_idx.read(); 
+    
+    consortiums.write(consortium_idx = consortium_idx_, value = [consortium]);
+
+    consortium_idx.write(value=consortium_idx_+1);
+
+    tempvar member: Member* = new Member(votes = 100, prop = 1, ans = 1);
+    
+    members.write(consortium_idx=consortium_idx_, member_addr=caller, value=[member]);
     return ();
 }
 
@@ -120,75 +137,64 @@ func add_proposal{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_pt
     type: felt,
     deadline: felt,
 ) {
+    // only can be done by any member that has right to add proposals 
     alloc_locals;
-    let (caller) = get_caller_address();
 
-    // check that the caller has the right to make a proposal
+    // get caller adddress and verify if it has rights
+    let (caller : felt) = get_caller_address();
     let (member) = members.read(consortium_idx, caller);
-    assert TRUE = member.prop;
 
-    let (local proposal_id) = proposals_idx.read(consortium_idx);
-
-    if (title_len - 1 == 0) {
-        // create a Proposal struct
-        proposals.write(consortium_idx, proposal_id, Proposal(type, 0, 0, deadline, 0));
-
-        // string_idx for title starts from 0
-        proposals_title.write(consortium_idx, proposal_id, title_len - 1, [title]);
-
-        if (link_len - 1 == 0) {
-            proposals_link.write(consortium_idx, proposal_id, [link], link_len - 1);
-
-            tempvar syscall_ptr = syscall_ptr;
-            tempvar pedersen_ptr = pedersen_ptr;
-            tempvar range_check_ptr = range_check_ptr;
-        } else {
-            tempvar syscall_ptr = syscall_ptr;
-            tempvar pedersen_ptr = pedersen_ptr;
-            tempvar range_check_ptr = range_check_ptr;
-        }
-    } else {
-        tempvar syscall_ptr = syscall_ptr;
-        tempvar pedersen_ptr = pedersen_ptr;
-        tempvar range_check_ptr = range_check_ptr;
+    with_attr error_message("Only members are allowed to propose."){
+        assert TRUE = member.prop;
     }
 
-    if (ans_len == 0) {
-        // increment the proposal id of the consortium
-        proposals_idx.write(consortium_idx, proposal_id + 1);
+    // add proposal title
+    let (local proposal_idx_ : felt) = proposals_idx.read(consortium_idx);
 
-        // increment the number of proposal of the consortium
-        let (consortium) = consortiums.read(consortium_idx);
-        tempvar current_consortium_proposal = consortium.proposal_count;
-        consortiums.write(
-            consortium_idx, Consortium(consortium.chairperson, current_consortium_proposal + 1)
-        );
+    let proposal: Proposal = Proposal(
+        type=type,
+        win_idx=0,
+        ans_idx=ans_len,
+        deadline=deadline,
+        over=FALSE,
+    );
+    
+    proposals.write(consortium_idx, proposal_idx_, value = proposal);
+    proposals_idx.write(consortium_idx, value=proposal_idx_ + 1);
 
-        tempvar syscall_ptr = syscall_ptr;
-        tempvar pedersen_ptr = pedersen_ptr;
-        tempvar range_check_ptr = range_check_ptr;
-    } else {
-        let (proposal) = proposals.read(consortium_idx, proposal_id);
-        tempvar nb_answers = proposal.ans_idx;  // get number of answers for the current proposal - starting from 0
+    // title
+    load_selector(
+    string_len = title_len,
+    string = title,
+    slot_idx = 0,
+    proposal_idx = proposal_idx_,
+    consortium_idx = consortium_idx,
+    selector = KEY_PROPOSALS_TITLE,
+    offset = MAX_LEN,
+    );
 
-        // write answers of the proposal
-        proposals_answers.write(
-            consortium_idx, proposal_id, ans_len - 1, Answer(ans[ans_len - 1], 0)
-        );
+    // link
 
-        // increment the number of answersfor this proposal
-        proposals.write(
-            consortium_idx,
-            proposal_id,
-            Proposal(proposal.type, proposal.win_idx, nb_answers + 1, proposal.deadline, proposal.over),
-        );
+    load_selector(
+    string_len = link_len,
+    string = link,
+    slot_idx = 0,
+    proposal_idx = proposal_idx_,
+    consortium_idx = consortium_idx,
+    selector = KEY_PROPOSALS_LINK,
+    offset = MAX_LEN,
+    );
 
-        add_proposal(consortium_idx, 0, title, 0, link, ans_len - 1, ans, type, deadline);  // recursive call to add all the answers
-
-        tempvar syscall_ptr = syscall_ptr;
-        tempvar pedersen_ptr = pedersen_ptr;
-        tempvar range_check_ptr = range_check_ptr;
-    }
+    // answers
+    load_selector(
+    string_len = ans_len,
+    string = ans,
+    slot_idx = 0,
+    proposal_idx = proposal_idx_,
+    consortium_idx = consortium_idx,
+    selector = KEY_PROPOSALS_ANSWERS,
+    offset = 1,
+    );
 
     return ();
 }
@@ -197,14 +203,20 @@ func add_proposal{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_pt
 func add_member{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     consortium_idx: felt, member_addr: felt, prop: felt, ans: felt, votes: felt
 ) {
-    // check that the caller is the chairperson
-    let (caller) = get_caller_address();
-    let (consortium) = consortiums.read(consortium_idx);
-    assert caller = consortium.chairperson;
+  
+    // get chairperson address and compare to the caller address
+    let (consortium) = consortiums.read(consortium_idx); 
 
-    // add new member
-    members.write(consortium_idx, member_addr, Member(votes, prop, ans));
+    let (caller : felt) = get_caller_address(); 
 
+    with_attr error_message("Only the chairperson is allowed."){
+        assert caller = consortium.chairperson;
+    }
+
+    // add member
+    tempvar member: Member* = new Member(votes = votes, prop = prop, ans = ans);
+    
+    members.write(consortium_idx=consortium_idx, member_addr=member_addr, value=[member]);
     return ();
 }
 
@@ -212,32 +224,58 @@ func add_member{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}
 func add_answer{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     consortium_idx: felt, proposal_idx: felt, string_len: felt, string: felt*
 ) {
+    // only done by permitted member
     alloc_locals;
-    if (string_len == 0) {
-        return ();
+    let (caller : felt) = get_caller_address();
+    let (member) = members.read(consortium_idx, caller);
+
+    with_attr error_message("Only members are allowed to answer."){
+        assert TRUE = member.ans;
     }
 
-    // check that the caller has the right to make a answer
-    let (local caller) = get_caller_address();
-    let (member) = members.read(consortium_idx, caller);
-    assert TRUE = member.ans;
+    // proposal has to allow additions
 
-    let (proposal) = proposals.read(consortium_idx, proposal_idx);  // get Proposal struct thanks to consortium id + proposal id
-    tempvar nb_answers = proposal.ans_idx;  // get number of answers for the current proposal - starting from 0
+    let (proposal) = proposals.read(consortium_idx, proposal_idx);
 
-    proposals_answers.write(consortium_idx, proposal_idx, nb_answers, Answer([string], 0));
+    with_attr error_message("The proposal doesn't allow ansers."){
+        assert TRUE = proposal.type;
+    }
 
-    // increment the number of answersfor this proposal
-    proposals.write(
-        consortium_idx,
-        proposal_idx,
-        Proposal(proposal.type, proposal.win_idx, nb_answers + 1, proposal.deadline, proposal.over),
+
+    // one member can add only one answer
+    let (local member_answered : felt) = answered.read(consortium_idx, proposal_idx, caller);
+
+    with_attr error_message("Member already answered."){
+        assert FALSE = member_answered;
+    }
+ 
+    // answers
+    load_selector(
+    string_len = string_len,
+    string = string,
+    slot_idx = proposal.ans_idx,
+    proposal_idx = proposal_idx,
+    consortium_idx = consortium_idx,
+    selector = KEY_PROPOSALS_ANSWERS,
+    offset = 1,
     );
 
-    add_answer(consortium_idx, proposal_idx, string_len - 1, string + 1);  // recursive call until string_len is 0
+    answered.write(consortium_idx, proposal_idx, caller, 1);
 
-    // store that the caller has made a answer's proposal
-    answered.write(consortium_idx, proposal_idx, caller, TRUE);
+    // Update proposal record
+    tempvar new_proposal: Proposal* = new Proposal(
+        type=proposal.type,
+        win_idx=proposal.win_idx,
+        ans_idx=proposal.ans_idx+1,
+        deadline=proposal.deadline,
+        over=proposal.over,
+    );
+    proposals.write(
+        consortium_idx=consortium_idx,
+        proposal_idx=proposal_idx,
+        value=[new_proposal],
+    );
+
 
     return ();
 }
@@ -246,28 +284,38 @@ func add_answer{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}
 func vote_answer{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     consortium_idx: felt, proposal_idx: felt, answer_idx: felt
 ) {
-    // check that the caller has at least one vote
-    let (caller) = get_caller_address();
+    // only can be done by the member with at least 1 vote who didn't voted on the proposal yet
+    
+    let (caller : felt) = get_caller_address();
     let (member) = members.read(consortium_idx, caller);
-    assert_nn(member.votes);
 
-    // check that the caller has not voted yet
-    let (state_voted) = voted.read(consortium_idx, proposal_idx, caller);
-    assert state_voted = 0;
 
-    // take into account the vote of the caller
-    let (answer) = proposals_answers.read(consortium_idx, proposal_idx, answer_idx);
-    tempvar current_answer_votes = answer.votes;
+    // check if they have votes
+    with_attr error_message("Not enough votes."){
+        assert_le(1, member.votes);
+    }
 
-    proposals_answers.write(
-        consortium_idx,
-        proposal_idx,
-        answer_idx,
-        Answer(answer.text, current_answer_votes + member.votes),
-    );
+    let (member_voted) = voted.read(consortium_idx, proposal_idx, caller);
 
-    // add the caller as a voter
+    // check if voted
+    with_attr error_message("Already voted.") {
+        assert FALSE = member_voted;
+    }
+
+    // get answer votes
+    let (current_answer) = proposals_answers.read(consortium_idx, proposal_idx, answer_idx);
+
+    // update answer with user vote
+    tempvar update_answer : Answer* = new Answer(text = current_answer.text, votes = current_answer.votes + member.votes);
+    proposals_answers.write(consortium_idx, proposal_idx, answer_idx, value=[update_answer]);
+
+
+    // register the caller that it voted
     voted.write(consortium_idx, proposal_idx, caller, 1);
+
+    // reduce votes to the member 
+    tempvar update_member : Member* = new Member(votes = member.votes - 1, prop = member.prop, ans = member.votes);
+    members.write(consortium_idx, caller, value=[update_member]);
 
     return ();
 }
@@ -276,43 +324,77 @@ func vote_answer{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr
 func tally{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     consortium_idx: felt, proposal_idx: felt
 ) -> (win_idx: felt) {
-    // check taht the caller is the chairman
-    let (caller) = get_caller_address();
-    let (consortium) = consortiums.read(consortium_idx);
-    assert consortium.chairperson = caller;
+    // only done by chairman, anytime or by anyone provided vote deadline has expired. 
+    // index of the answer with the highest amount of votes is return as the winner 
+    let (proposal: Proposal) = proposals.read(
+        consortium_idx=consortium_idx,
+        proposal_idx=proposal_idx
+    );
 
-    let (proposal) = proposals.read(consortium_idx, proposal_idx);
-    tempvar nb_answers = proposal.ans_idx;
+    // If before deadline, only Chairperson can call this
+    let (caller: felt) = get_caller_address();
+    let (consortium: Consortium) = consortiums.read(consortium_idx=consortium_idx);
+    let (current_timesamp: felt) = get_block_timestamp();
+    let is_before_deadline: felt = is_le(current_timesamp, proposal.deadline);
 
-    let (winner_idx) = find_highest(consortium_idx, proposal_idx, 0, 0, nb_answers);
+    if (is_before_deadline == TRUE) {
+        with_attr error_message("Only Chairperson can tally before deadline has passed") {
+            assert caller = consortium.chairperson;
+        }
+    }
 
+    let (winner_idx: felt) = find_highest(
+        consortium_idx=consortium_idx,
+        proposal_idx=proposal_idx,
+        highest=0,
+        idx=0,
+        countdown=proposal.ans_idx,
+    );
     return (winner_idx,);
 }
+
 
 // Internal functions
 //#########################################################################################
 
+
 func find_highest{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_ptr}(
     consortium_idx: felt, proposal_idx: felt, highest: felt, idx: felt, countdown: felt
 ) -> (idx: felt) {
+
+    // return the index of the answer with the highest amount of votes
     if (countdown == 0) {
-        return (idx=idx);
+        return (highest,);
     }
 
-    let (answer) = proposals_answers.read(consortium_idx, proposal_idx, countdown);
+    // Compare the votes of the two Answers by index
+    let (answer_1: Answer) = proposals_answers.read(
+        consortium_idx=consortium_idx,
+        proposal_idx=proposal_idx,
+        answer_idx=highest,
+    );
 
-    let is_answer_votes_greater_than_highest = is_le(highest, answer.votes);
+    let (answer_2: Answer) = proposals_answers.read(
+        consortium_idx=consortium_idx,
+        proposal_idx=proposal_idx,
+        answer_idx=idx,
+    );
 
-    if (is_answer_votes_greater_than_highest == 1) {
-        let (res) = find_highest(
-            consortium_idx, proposal_idx, answer.votes, countdown, countdown - 1
-        );
-        return (idx=res);
+    // If votes for answer_1 is less than answer_2, highest = current idx
+    let is_1_le_2: felt = is_le(answer_1.votes, answer_2.votes);
+    if (is_1_le_2 == TRUE) {
+        tempvar highest = idx;
+    } else {
+        tempvar highest = highest;
     }
 
-    let (idx) = find_highest(consortium_idx, proposal_idx, highest, idx, countdown - 1);
-
-    return (idx,);
+    return find_highest(
+        consortium_idx=consortium_idx,
+        proposal_idx=proposal_idx,
+        highest=highest,
+        idx=idx+1,
+        countdown=countdown-1,
+    );    
 }
 
 // Loads it based on length, internall calls only
@@ -325,5 +407,37 @@ func load_selector{syscall_ptr: felt*, pedersen_ptr: HashBuiltin*, range_check_p
     selector: felt,
     offset: felt,
 ) {
+    let (q : felt, r: felt) = unsigned_div_rem(string_len, offset);
+    let r_nn: felt = is_not_zero(r);
+
+    if (q == 0 and r == 0) {
+        return (); 
+    }
+
+    let (hash_1: felt) = hash2{hash_ptr=pedersen_ptr}(selector, consortium_idx);
+    let (hash_2: felt) = hash2{hash_ptr=pedersen_ptr}(hash_1, proposal_idx);
+    let (key: felt) = hash2{hash_ptr=pedersen_ptr}(hash_2, slot_idx);
+
+    storage_write(
+        address=key,
+        value=[string]
+    );
+
+    if (r_nn == TRUE) {
+        tempvar offset = r;
+    } else {
+        tempvar offset = offset; 
+    }
+    
+    load_selector(
+        string_len = string_len-offset,
+        string = string+offset,
+        slot_idx = slot_idx+1,
+        proposal_idx = proposal_idx,
+        consortium_idx = consortium_idx,
+        selector = selector,
+        offset = offset
+        );
+
     return ();
 }

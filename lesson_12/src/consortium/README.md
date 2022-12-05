@@ -36,7 +36,7 @@ Index of the answer with the highest amount of votes is returned as the winner.
 
 ## Load Selector method  
 
-Contract allow to store arbitrarily large string for the URL for the proposal, and the title, whilst the asnwers are one felt.
+Contract allow to store arbitrarily large string for the URL for the proposal, and the title, whilst the answers are one felt.
 
 One felt can only store a short string.
 
